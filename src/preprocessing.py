@@ -1,87 +1,85 @@
 import pandas as pd
-import re
-from settings import DATA_DIR
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from sklearn.model_selection import train_test_split
+from pathlib import Path
+import re
 
-def concat_dataset():
-    """Dataset was already split and kaggle load was not working"""
+# ====== CONFIG ======
+DATA_DIR = Path("data")
+MODEL_NAME = "facebook/bart-base"
+MAX_INPUT_LENGTH = 1024
+MAX_TARGET_LENGTH = 256
 
-    df_1 = pd.read_csv(DATA_DIR / 'train.csv')
-    df_2 = pd.read_csv(DATA_DIR / 'validation.csv')
-    df_3 = pd.read_csv(DATA_DIR / 'test.csv')
 
-    _df = pd.concat([df_1, df_2, df_3])
-    _df.to_csv(DATA_DIR / 'dataset.csv', index=False)
+# ====== FUNZIONE: Pulizia testo ======
+def clean_scientific_text(text):
+    if not isinstance(text, str):
+        return ""
+    # Rimuove spazi multipli
+    text = re.sub(r'\s+', ' ', text)
+    # Rimuove riferimenti tipo [1], [12], ecc.
+    text = re.sub(r'\[\d+\]', '', text)
+    # Rimuove caratteri non utili (tranne punteggiatura base)
+    text = re.sub(r'[^a-zA-Z0-9.,;:!?\'\"()\s-]', '', text)
+    # Elimina spazi iniziali/finali
+    return text.strip()
 
-def clean_scientific_text(text: str) -> str:
-    # ​​ Rimuove tag HTML (se il testo viene da file .html)
-    text = re.sub(r'<.*?>', ' ', text)
 
-    # ​​ Rimuove hiperlink (URL) e indirizzi email
-    text = re.sub(r'https?://\S+', ' ', text)
-    text = re.sub(r'\S+@\S+', ' ', text)
-
-    # ​​ Rimuove citazioni numeriche tipo [1], [12, 34] (ben formate)
-    text = re.sub(r'\[\s*\d+(?:\s*,\s*\d+)*\s*\]', ' ', text)
-
-    # ​​ Rimuove riferimenti autore-anno tipo (Smith et al., 2020)
-    text = re.sub(r'\([A-Za-z][A-Za-z\s\.\-]*et al\.,\s*\d{4}\)', ' ', text)
-
-    # ​​ Rimuove formule inline LaTeX come $...$ (da più attento a $$...$$)
-    text = re.sub(r'\${1,2}.*?\${1,2}', ' ', text)
-
-    # ​​ Rimuove testo tra parentesi quadre o tonde (generico)
-    text = re.sub(r'\[.*?\]|\(.*?\)', ' ', text)
-
-    # ​​ Rimuove simboli, punteggiatura non alfanumerica (ma conserva spazi e lettere accentate)
-    text = re.sub(r'[^a-zA-Z0-9À-ž\s]', ' ', text)
-
-    # ​​ Minimizza spazi multipli e strip
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    # ​​ Opzionale: lowercase (decidi se serve al tuo caso)
-    # text = text.lower()
-
-    return str(text)
-
+# ====== FUNZIONE: Preprocess per tokenizzazione ======
 def preprocess(batch):
-    articles = [clean_scientific_text(foo) for foo in batch['article']]
-    abstracts = [clean_scientific_text(foo) for foo in batch['abstract']]
-    inputs = tokenizer(
-        articles, # text input is expected to be list[str]
-        max_length=1024, # we have to se the length of the articles
+    model_inputs = tokenizer(
+        batch["article"],
+        max_length=MAX_INPUT_LENGTH,
         truncation=True,
-        padding='max_length',
-        return_tensors='pt'
+        padding="max_length"
     )
+    labels = tokenizer(
+        batch["abstract"],
+        max_length=MAX_TARGET_LENGTH,
+        truncation=True,
+        padding="max_length"
+    )
+    model_inputs["labels"] = labels["input_ids"]
+    return model_inputs
 
-    with tokenizer.as_target_tokenizer():
-        labels = tokenizer(
-            abstracts,
-            max_length=256,
-            truncation=True,
-            padding='max_length',
-            return_tensors='pt'
-        )
-
-    inputs['labels'] = labels['input_ids'] # tokenized abstract IDs
-    return inputs
 
 if __name__ == '__main__':
-    model_name = "facebook/bart-base"
-    # model_name = "facebook/bart-large"
-    print(f"Selected model: {model_name}")
-    print("Loading Tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    print("Tokenizer...")
-    print("Loading Model...")
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-    print("Model...")
+    # 1. Carica modello e tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
-    print("Loading Data...")
-    df = pd.read_csv(DATA_DIR / 'dataset.csv', header=0, dtype=str, nrows=5)
+    # 2. Carica dataset concatenato
+    df = pd.read_csv(DATA_DIR / 'dataset.csv', header=0, dtype=str)
 
-    dataset = Dataset.from_pandas(df) # Tokenizer is meant to work with Dataset Object
-    processed = dataset.map(preprocess, batched=True)
-    print(processed[0])
+    # 3. Pulizia testo
+    df['article'] = df['article'].apply(clean_scientific_text)
+    df['abstract'] = df['abstract'].apply(clean_scientific_text)
+
+    # 4. Conversione in Dataset HuggingFace
+    dataset = Dataset.from_pandas(df)
+
+    # 5. Split train (80%) / temp (20%)
+    split_dataset = dataset.train_test_split(test_size=0.2, seed=42)
+
+    # 6. Split temp in validation (10%) / test (10%)
+    temp_split = split_dataset['test'].train_test_split(test_size=0.5, seed=42)
+
+    dataset_splits = {
+        'train': split_dataset['train'],
+        'validation': temp_split['train'],
+        'test': temp_split['test']
+    }
+
+    # 7. Salvataggio CSV puliti
+    for split_name, split_data in dataset_splits.items():
+        split_df = pd.DataFrame(split_data)
+        split_df.to_csv(DATA_DIR / f"{split_name}_clean.csv", index=False)
+        print(f"✅ Salvato {split_name}_clean.csv con {len(split_df)} righe")
+
+    # 8. Tokenizzazione di tutti gli split
+    tokenized_splits = {}
+    for split_name, split_data in dataset_splits.items():
+        tokenized_splits[split_name] = split_data.map(preprocess, batched=True)
+
+    print("✅ Tokenizzazione completata per train/val/test")
