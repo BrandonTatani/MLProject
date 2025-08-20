@@ -4,13 +4,13 @@ from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-from settings import *
+from src.settings import *
 
 DATA_DIR = BASE_DIR / "data"
 # 1. Carica modello e tokenizer
-print("\rLoading tokenizer...", end='')
+print('Loading tokenizer...')
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-print("\rLoading model...", end='')
+print('Loading model...')
 model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
 
@@ -67,11 +67,30 @@ def clean_scientific_text(text):
 class Preprocessor:
     def __init__(self):
 
+        # loading tokenized dataset from cache if available
+        if CACHED:
+            print("Loading cached dataset...")
+            self.tokenized_paths = {
+                'train' : DATA_DIR / 'train_tokenized',
+                'validation' : DATA_DIR / 'validation_tokenized',
+                'test' : DATA_DIR / 'test_tokenized',
+            }
+
+            if all(path.exists() for path in self.tokenized_paths.values()):
+                self.splits = {
+                    name: Dataset.load_from_disk(path)
+                    for name, path in self.tokenized_paths.items()
+                }
+
+                print(self.splits)
+                return
+            else:
+                print("Cached data was not found. Creating new one...")
 
         # 2. Carica dataset concatenato
         print("\rLoading dataset...", end='')
         if DEBUG:
-            df = pd.read_csv(DATA_DIR / 'dataset.csv', header=0, dtype=str, nrows=10)
+            df = pd.read_csv(DATA_DIR / 'dataset.csv', header=0, dtype=str, nrows=200)
         else:
             df = load_csv(DATA_DIR / 'dataset.csv', 1000)
 
@@ -102,8 +121,10 @@ class Preprocessor:
         self.splits = {}
         for split_name, split_data in self.dataset_splits.items():
             print('Splitting {}...'.format(split_name))
-            self.splits[split_name] = split_data.map(preprocess_token, batched=True)
-
+            self.splits[split_name] = split_data.map(preprocess_token, batched=True, remove_columns=['article', 'abstract'])
+            if CACHED: # if caching is enabled, the tokenized splits are saved to disk
+                print("Caching split {}...".format(split_name))
+                self.splits[split_name].save_to_disk(DATA_DIR / f'{split_name}_tokenized')
         print("✅ Tokenizzazione completata per train/val/test")
 
 
