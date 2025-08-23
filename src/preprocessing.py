@@ -14,6 +14,21 @@ print('Loading model...')
 model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
 
+def slicing_logic(row) -> bool:
+    """
+    slicing logic for pandas dataframe, leaves only entries with less than 1500 word.
+    needed to reduce the dimentions of the dataset and reduce the number of tokens required.
+    :param row:
+    :return: bool
+    """
+    if not type(row['article']) is str: return False
+
+    length = len(row['article'].split(' '))
+    if  100 < length < 1000:
+        return True
+    return False
+
+
 def preprocess_token(batch):
     model_inputs = tokenizer(
         batch["article"],
@@ -90,17 +105,27 @@ class Preprocessor:
         # 2. Carica dataset concatenato
         print("\rLoading dataset...", end='')
         if DEBUG:
-            df = pd.read_csv(DATA_DIR / 'dataset.csv', header=0, dtype=str, nrows=200)
+            df = pd.read_csv(DATA_DIR / 'dataset.csv', header=0, dtype=str, nrows=2000)
         else:
             df = load_csv(DATA_DIR / 'dataset.csv', 1000)
 
+
+        print("Reducing dataset...")
+        df_filtered = df[df.apply(slicing_logic, axis=1)]
+        df_filtered.reset_index(drop=True, inplace=True)
+
         # 3. Pulizia testo
-        for chunk in tqdm(range(len(df)), desc='Cleaning Dataset'):
-            df.at[chunk, 'article'] = clean_scientific_text(df.at[chunk, 'article'])
-            df.at[chunk, 'abstract'] = clean_scientific_text(df.at[chunk, 'abstract'])
+        for chunk in tqdm(range(len(df_filtered)), desc='Cleaning Dataset'):
+            df_filtered.at[chunk, 'article'] = clean_scientific_text(df_filtered.at[chunk, 'article'])
+            df_filtered.at[chunk, 'abstract'] = clean_scientific_text(df_filtered.at[chunk, 'abstract'])
+
+        df_clean = df_filtered[df_filtered.apply(slicing_logic, axis=1)]
+        df_clean.reset_index(drop=True, inplace=True)
+        print(df_clean.shape)
+
 
         # 4. Conversione in Dataset HuggingFace
-        self.dataset = Dataset.from_pandas(df)
+        self.dataset = Dataset.from_pandas(df_filtered)
         print(self.dataset)
 
         # 5. Split train (80%) / temp (20%)
@@ -122,11 +147,27 @@ class Preprocessor:
         for split_name, split_data in self.dataset_splits.items():
             print('Splitting {}...'.format(split_name))
             self.splits[split_name] = split_data.map(preprocess_token, batched=True, remove_columns=['article', 'abstract'])
-            if CACHED: # if caching is enabled, the tokenized splits are saved to disk
-                print("Caching split {}...".format(split_name))
-                self.splits[split_name].save_to_disk(DATA_DIR / f'{split_name}_tokenized')
+            print("Caching split {}...".format(split_name))
+            self.splits[split_name].save_to_disk(DATA_DIR / f'{split_name}_tokenized')
         print("✅ Tokenizzazione completata per train/val/test")
 
+    def train(self):
+        """
+            :return: tokenized train split
+        """
+        return self.splits['train']
+
+    def eval(self):
+        """
+        :return: tokenized validation split
+        """
+        return self.splits['validation']
+
+    def test(self):
+        """
+        :return: tokenized test split
+        """
+        return self.splits['test']
 
     def save_splits(self):
         # 7. Salvataggio CSV puliti
